@@ -1,162 +1,248 @@
+import { useEffect, useMemo, useState } from "react";
 import "./styles.css";
+import { ADMIN_NAME, TEACHER_NAME } from "./constants";
+import { loadState, saveState, seedState, uid } from "./store";
+import { AppState, ObservationRecord, RecordDraft, Role, Slide } from "./types";
+import AdminView from "./views/AdminView";
+import TeacherView from "./views/TeacherView";
 
-const project = {
-  "id": "hxwl-06",
-  "port": 5106,
-  "title": "显微镜玻片观察",
-  "subtitle": "样本、多倍率视野与染色观察记录库",
-  "stack": "React + Vite + TypeScript + CSS",
-  "theme": [
-    "#4338ca",
-    "#0d9488",
-    "#db2777"
-  ],
-  "domain": "生物显微观察",
-  "users": [
-    "实验课教师",
-    "学生",
-    "实验管理员"
-  ],
-  "metrics": [
-    "样本数",
-    "视野记录",
-    "染色方法",
-    "重点结构"
-  ],
-  "filters": [
-    "植物组织",
-    "动物组织",
-    "微生物",
-    "血液涂片"
-  ],
-  "fields": [
-    "样本名称",
-    "样本类型",
-    "染色方式",
-    "放大倍数",
-    "观察结构",
-    "视野描述"
-  ],
-  "records": [
-    [
-      "洋葱表皮",
-      "植物组织",
-      "碘液",
-      "400x",
-      "细胞壁清晰，细胞核可见"
-    ],
-    [
-      "人血涂片",
-      "血液涂片",
-      "瑞氏染色",
-      "1000x",
-      "红细胞分布均匀"
-    ],
-    [
-      "草履虫",
-      "微生物",
-      "活体观察",
-      "200x",
-      "纤毛运动明显"
-    ]
-  ]
-};
-
-const statusColors = ["status-ok", "status-watch", "status-danger"];
+const ROLE_KEY = "hxwl-06-role";
 
 function MetricCard({ label, value, index }: { label: string; value: string; index: number }) {
   return (
     <article className="metric-card">
       <span>{label}</span>
       <strong>{value}</strong>
-      <i className={statusColors[index % statusColors.length]} />
+      <i className={`m-${index % 4}`} />
     </article>
   );
 }
 
-function App() {
-  const values = project.metrics.map((metric: string, index: number) => {
-    const base = [84, 12, 31, 7][index % 4];
-    return String(base + index * 3);
-  });
+export default function App() {
+  const [state, setState] = useState<AppState>(loadState);
+  const [role, setRole] = useState<Role>(() =>
+    localStorage.getItem(ROLE_KEY) === "admin" ? "admin" : "teacher"
+  );
+  const [selectedSlideId, setSelectedSlideId] = useState<string | null>(
+    () => loadState().slides[0]?.id ?? null
+  );
+
+  // 任何状态变化都写入 localStorage：关掉页面后草稿与复核原因仍在
+  useEffect(() => saveState(state), [state]);
+  useEffect(() => localStorage.setItem(ROLE_KEY, role), [role]);
+
+  // 数据重置后保证选中项有效
+  useEffect(() => {
+    if (!selectedSlideId || !state.slides.some((s) => s.id === selectedSlideId)) {
+      setSelectedSlideId(state.slides[0]?.id ?? null);
+    }
+  }, [state.slides, selectedSlideId]);
+
+  const metrics = useMemo(() => {
+    const rs = state.records;
+    const count = (st: ObservationRecord["status"]) => rs.filter((r) => r.status === st).length;
+    return [
+      { label: "玻片总数", value: String(state.slides.length) },
+      { label: "待复核记录", value: String(count("pending")) },
+      { label: "已定稿结论", value: String(count("approved")) },
+      { label: "草稿 / 退回", value: `${count("draft")} / ${count("rejected")}` },
+    ];
+  }, [state]);
+
+  // ---------- 教师侧操作 ----------
+
+  const addSlide = (data: { name: string; sampleType: string; staining: string }) => {
+    const slide: Slide = { id: uid(), createdAt: Date.now(), ...data };
+    setState((s) => ({ ...s, slides: [slide, ...s.slides] }));
+    setSelectedSlideId(slide.id);
+  };
+
+  const saveRecord = (
+    slideId: string,
+    draft: RecordDraft,
+    recordId: string | undefined,
+    submit: boolean
+  ) => {
+    const now = Date.now();
+    setState((s) => {
+      if (recordId) {
+        // 只允许修改草稿或被退回的记录；已定稿与待复核不可改
+        return {
+          ...s,
+          records: s.records.map((r) => {
+            if (r.id !== recordId || (r.status !== "draft" && r.status !== "rejected")) return r;
+            return {
+              ...r,
+              ...draft,
+              status: submit ? "pending" : r.status,
+              updatedAt: now,
+              history: submit
+                ? [...r.history, { id: uid(), action: "submit" as const, by: TEACHER_NAME, at: now }]
+                : r.history,
+            };
+          }),
+        };
+      }
+      const record: ObservationRecord = {
+        id: uid(),
+        slideId,
+        ...draft,
+        status: submit ? "pending" : "draft",
+        createdAt: now,
+        updatedAt: now,
+        history: submit
+          ? [{ id: uid(), action: "submit", by: TEACHER_NAME, at: now }]
+          : [],
+      };
+      return { ...s, records: [record, ...s.records] };
+    });
+  };
+
+  const submitRecord = (id: string) => {
+    const now = Date.now();
+    setState((s) => ({
+      ...s,
+      records: s.records.map((r) =>
+        r.id === id && (r.status === "draft" || r.status === "rejected")
+          ? {
+              ...r,
+              status: "pending",
+              updatedAt: now,
+              history: [...r.history, { id: uid(), action: "submit" as const, by: TEACHER_NAME, at: now }],
+            }
+          : r
+      ),
+    }));
+  };
+
+  const deleteRecord = (id: string) => {
+    // 仅草稿可删除；已定稿与历史记录始终保留
+    setState((s) => ({
+      ...s,
+      records: s.records.filter((r) => !(r.id === id && r.status === "draft")),
+    }));
+  };
+
+  // ---------- 管理员侧操作 ----------
+
+  const approveRecord = (id: string) => {
+    const now = Date.now();
+    setState((s) => ({
+      ...s,
+      records: s.records.map((r) =>
+        r.id === id && r.status === "pending"
+          ? {
+              ...r,
+              status: "approved",
+              updatedAt: now,
+              history: [...r.history, { id: uid(), action: "approve" as const, by: ADMIN_NAME, at: now }],
+            }
+          : r
+      ),
+    }));
+  };
+
+  const rejectRecord = (id: string, reason: string) => {
+    const now = Date.now();
+    setState((s) => ({
+      ...s,
+      records: s.records.map((r) =>
+        r.id === id && r.status === "pending"
+          ? {
+              ...r,
+              status: "rejected",
+              updatedAt: now,
+              history: [
+                ...r.history,
+                { id: uid(), action: "reject" as const, reason, by: ADMIN_NAME, at: now },
+              ],
+            }
+          : r
+      ),
+    }));
+  };
+
+  const resetAll = () => {
+    if (!window.confirm("将清空当前全部数据并恢复示例数据，确定？")) return;
+    const fresh = seedState();
+    setState(fresh);
+    setSelectedSlideId(fresh.slides[0]?.id ?? null);
+  };
 
   return (
     <main className="app-shell">
       <section className="hero">
         <div>
-          <p className="eyebrow">{project.id} · port {project.port}</p>
-          <h1>{project.title}</h1>
-          <p className="subtitle">{project.subtitle}</p>
+          <p className="eyebrow">hxwl-06 · 生物显微观察</p>
+          <h1>显微镜玻片观察记录库</h1>
+          <p className="subtitle">
+            同一玻片按倍率分次录入视野记录：教师先存草稿，提交后由管理员复核；批准即定稿锁定，
+            退回需写明原因，教师修改后可再次提交。补拍高倍视野只能新增记录，
+            旧记录与已定稿结论始终保留。
+          </p>
+          <div className="flow-legend">
+            <span>草稿</span>
+            <i>→</i>
+            <span>待复核</span>
+            <i>→</i>
+            <span>已定稿</span>
+            <em>退回（附原因）→ 修改后重新提交</em>
+          </div>
         </div>
         <div className="stack-card">
-          <span>技术栈</span>
-          <strong>{project.stack}</strong>
+          <span>当前角色</span>
+          <div className="role-switch">
+            <button
+              className={role === "teacher" ? "active" : ""}
+              onClick={() => setRole("teacher")}
+            >
+              实验课教师
+            </button>
+            <button
+              className={role === "admin" ? "active" : ""}
+              onClick={() => setRole("admin")}
+            >
+              实验管理员
+            </button>
+          </div>
+          <p className="role-hint">
+            {role === "teacher"
+              ? "录入草稿、提交复核、按退回原因修改后重新提交"
+              : "复核待办队列，批准定稿或写明原因退回"}
+          </p>
         </div>
       </section>
 
       <section className="metrics-grid">
-        {project.metrics.map((metric: string, index: number) => (
-          <MetricCard key={metric} label={metric} value={values[index]} index={index} />
+        {metrics.map((m, i) => (
+          <MetricCard key={m.label} label={m.label} value={m.value} index={i} />
         ))}
       </section>
 
-      <section className="workspace">
-        <aside className="panel narrow">
-          <h2>角色</h2>
-          <div className="chips">
-            {project.users.map((user: string) => (
-              <span key={user}>{user}</span>
-            ))}
-          </div>
-          <h2>筛选</h2>
-          <div className="chips muted">
-            {project.filters.map((filter: string) => (
-              <button key={filter}>{filter}</button>
-            ))}
-          </div>
-        </aside>
+      {role === "teacher" ? (
+        <TeacherView
+          slides={state.slides}
+          records={state.records}
+          selectedSlideId={selectedSlideId}
+          onSelectSlide={setSelectedSlideId}
+          onAddSlide={addSlide}
+          onSaveRecord={saveRecord}
+          onSubmitRecord={submitRecord}
+          onDeleteRecord={deleteRecord}
+        />
+      ) : (
+        <AdminView
+          slides={state.slides}
+          records={state.records}
+          onApprove={approveRecord}
+          onReject={rejectRecord}
+        />
+      )}
 
-        <section className="panel">
-          <div className="section-heading">
-            <div>
-              <p>{project.domain}</p>
-              <h2>记录字段</h2>
-            </div>
-            <button className="primary-action">新增记录</button>
-          </div>
-          <div className="field-grid">
-            {project.fields.map((field: string) => (
-              <label key={field}>
-                <span>{field}</span>
-                <input placeholder={"填写" + field} />
-              </label>
-            ))}
-          </div>
-        </section>
-      </section>
-
-      <section className="records panel">
-        <div className="section-heading">
-          <div>
-            <p>示例数据</p>
-            <h2>近期记录</h2>
-          </div>
-          <button>导出摘要</button>
-        </div>
-        <div className="record-list">
-          {project.records.map((record: string[], index: number) => (
-            <article key={record.join("-")} className="record-card">
-              <div className="record-index">{String(index + 1).padStart(2, "0")}</div>
-              <div>
-                <h3>{record[0]}</h3>
-                <p>{record.slice(1).join(" · ")}</p>
-              </div>
-            </article>
-          ))}
-        </div>
-      </section>
+      <footer className="foot">
+        <p>数据保存在浏览器本地（localStorage），关闭页面后未提交的草稿与复核原因仍会保留。</p>
+        <button onClick={resetAll}>恢复示例数据</button>
+      </footer>
     </main>
   );
 }
-
-export default App;
