@@ -1,162 +1,153 @@
+import { useEffect, useReducer, useState } from "react";
 import "./styles.css";
+import type { Observation, Role } from "./types";
+import { ROLE_LABEL } from "./types";
+import { loadPersisted, persist, seedState } from "./storage";
+import {
+  makeObservation,
+  makeSlide,
+  reducer,
+  type ObservationPatch,
+  type State,
+} from "./state";
+import NewSlideForm from "./components/NewSlideForm";
+import SlideList from "./components/SlideList";
+import SlideDetail from "./components/SlideDetail";
+import ReviewQueue from "./components/ReviewQueue";
 
-const project = {
-  "id": "hxwl-06",
-  "port": 5106,
-  "title": "显微镜玻片观察",
-  "subtitle": "样本、多倍率视野与染色观察记录库",
-  "stack": "React + Vite + TypeScript + CSS",
-  "theme": [
-    "#4338ca",
-    "#0d9488",
-    "#db2777"
-  ],
-  "domain": "生物显微观察",
-  "users": [
-    "实验课教师",
-    "学生",
-    "实验管理员"
-  ],
-  "metrics": [
-    "样本数",
-    "视野记录",
-    "染色方法",
-    "重点结构"
-  ],
-  "filters": [
-    "植物组织",
-    "动物组织",
-    "微生物",
-    "血液涂片"
-  ],
-  "fields": [
-    "样本名称",
-    "样本类型",
-    "染色方式",
-    "放大倍数",
-    "观察结构",
-    "视野描述"
-  ],
-  "records": [
-    [
-      "洋葱表皮",
-      "植物组织",
-      "碘液",
-      "400x",
-      "细胞壁清晰，细胞核可见"
-    ],
-    [
-      "人血涂片",
-      "血液涂片",
-      "瑞氏染色",
-      "1000x",
-      "红细胞分布均匀"
-    ],
-    [
-      "草履虫",
-      "微生物",
-      "活体观察",
-      "200x",
-      "纤毛运动明显"
-    ]
-  ]
-};
+const initState = (): State => loadPersisted() ?? seedState();
 
-const statusColors = ["status-ok", "status-watch", "status-danger"];
+export default function App() {
+  const [role, setRole] = useState<Role>("teacher");
+  const [state, dispatch] = useReducer(reducer, undefined, initState);
+  const [selectedSlideId, setSelectedSlideId] = useState<string | null>(null);
+  const [highlightId, setHighlightId] = useState<string | null>(null);
 
-function MetricCard({ label, value, index }: { label: string; value: string; index: number }) {
-  return (
-    <article className="metric-card">
-      <span>{label}</span>
-      <strong>{value}</strong>
-      <i className={statusColors[index % statusColors.length]} />
-    </article>
-  );
-}
+  // 关键需求：未提交的草稿与复核原因在页面关闭后仍保留（localStorage 持久化）
+  useEffect(() => {
+    persist(state);
+  }, [state]);
 
-function App() {
-  const values = project.metrics.map((metric: string, index: number) => {
-    const base = [84, 12, 31, 7][index % 4];
-    return String(base + index * 3);
-  });
+  useEffect(() => {
+    if (!highlightId) return;
+    const timer = window.setTimeout(() => setHighlightId(null), 2600);
+    return () => window.clearTimeout(timer);
+  }, [highlightId]);
+
+  const selectedSlide =
+    state.slides.find((s) => s.id === selectedSlideId) ?? state.slides[0] ?? null;
+
+  const stats = {
+    slides: state.slides.length,
+    pending: state.observations.filter((o) => o.status === "pending").length,
+    approved: state.observations.filter((o) => o.status === "approved").length,
+    open: state.observations.filter((o) => o.status === "draft" || o.status === "rejected").length,
+  };
+
+  const addObservation = (slideId: string) => (patch: ObservationPatch, submit: boolean) =>
+    dispatch({ type: "observation/add", observation: makeObservation(slideId, patch, submit) });
+
+  const locateFromQueue = (obs: Observation) => {
+    setSelectedSlideId(obs.slideId);
+    setHighlightId(obs.id);
+    requestAnimationFrame(() => {
+      document.getElementById(`obs-${obs.id}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+    });
+  };
 
   return (
     <main className="app-shell">
-      <section className="hero">
-        <div>
-          <p className="eyebrow">{project.id} · port {project.port}</p>
-          <h1>{project.title}</h1>
-          <p className="subtitle">{project.subtitle}</p>
+      <header className="topbar">
+        <div className="topbar-title">
+          <p className="eyebrow">hxwl-06 · 生物显微观察</p>
+          <h1>显微镜玻片观察记录</h1>
+          <p className="subtitle">
+            同一玻片按倍率分次录入：先存草稿，提交后由管理员复核；批准即定稿锁定，
+            退回须写明原因，修改后可重新提交。草稿与复核原因保存在本机，关闭页面不丢失。
+          </p>
         </div>
-        <div className="stack-card">
-          <span>技术栈</span>
-          <strong>{project.stack}</strong>
-        </div>
-      </section>
-
-      <section className="metrics-grid">
-        {project.metrics.map((metric: string, index: number) => (
-          <MetricCard key={metric} label={metric} value={values[index]} index={index} />
-        ))}
-      </section>
-
-      <section className="workspace">
-        <aside className="panel narrow">
-          <h2>角色</h2>
-          <div className="chips">
-            {project.users.map((user: string) => (
-              <span key={user}>{user}</span>
+        <div className="role-card">
+          <span>当前角色</span>
+          <div className="role-switch">
+            {(Object.keys(ROLE_LABEL) as Role[]).map((r) => (
+              <button
+                key={r}
+                className={role === r ? "active" : ""}
+                onClick={() => setRole(r)}
+              >
+                {ROLE_LABEL[r]}
+              </button>
             ))}
           </div>
-          <h2>筛选</h2>
-          <div className="chips muted">
-            {project.filters.map((filter: string) => (
-              <button key={filter}>{filter}</button>
-            ))}
+          <div className="stats-row">
+            <span>
+              <strong>{stats.slides}</strong>玻片
+            </span>
+            <span>
+              <strong>{stats.pending}</strong>待复核
+            </span>
+            <span>
+              <strong>{stats.approved}</strong>已定稿
+            </span>
+            <span>
+              <strong>{stats.open}</strong>草稿/退回
+            </span>
           </div>
+        </div>
+      </header>
+
+      <div className="layout">
+        <aside className="panel side-panel">
+          {role === "teacher" && (
+            <NewSlideForm
+              onAdd={(name, sampleType, staining) => {
+                const slide = makeSlide(name, sampleType, staining);
+                dispatch({ type: "slide/add", slide });
+                setSelectedSlideId(slide.id);
+              }}
+            />
+          )}
+          <h2 className="side-title">玻片列表</h2>
+          <SlideList
+            slides={state.slides}
+            observations={state.observations}
+            selectedId={selectedSlide?.id ?? null}
+            onSelect={setSelectedSlideId}
+          />
         </aside>
 
-        <section className="panel">
-          <div className="section-heading">
-            <div>
-              <p>{project.domain}</p>
-              <h2>记录字段</h2>
-            </div>
-            <button className="primary-action">新增记录</button>
-          </div>
-          <div className="field-grid">
-            {project.fields.map((field: string) => (
-              <label key={field}>
-                <span>{field}</span>
-                <input placeholder={"填写" + field} />
-              </label>
-            ))}
-          </div>
-        </section>
-      </section>
+        <div className="main-column">
+          {role === "admin" && (
+            <ReviewQueue
+              slides={state.slides}
+              observations={state.observations}
+              onLocate={locateFromQueue}
+            />
+          )}
+          {selectedSlide ? (
+            <SlideDetail
+              slide={selectedSlide}
+              observations={state.observations.filter((o) => o.slideId === selectedSlide.id)}
+              role={role}
+              highlightId={highlightId}
+              onAddObservation={addObservation(selectedSlide.id)}
+              onSaveObservation={(id, patch, submit) =>
+                dispatch({ type: "observation/save", id, patch, submit })
+              }
+              onSubmitObservation={(id) => dispatch({ type: "observation/submit", id })}
+              onDeleteObservation={(id) => dispatch({ type: "observation/delete", id })}
+              onApprove={(id) => dispatch({ type: "observation/approve", id })}
+              onReject={(id, reason) => dispatch({ type: "observation/reject", id, reason })}
+            />
+          ) : (
+            <section className="panel empty-state">请先新增一个玻片。</section>
+          )}
+        </div>
+      </div>
 
-      <section className="records panel">
-        <div className="section-heading">
-          <div>
-            <p>示例数据</p>
-            <h2>近期记录</h2>
-          </div>
-          <button>导出摘要</button>
-        </div>
-        <div className="record-list">
-          {project.records.map((record: string[], index: number) => (
-            <article key={record.join("-")} className="record-card">
-              <div className="record-index">{String(index + 1).padStart(2, "0")}</div>
-              <div>
-                <h3>{record[0]}</h3>
-                <p>{record.slice(1).join(" · ")}</p>
-              </div>
-            </article>
-          ))}
-        </div>
-      </section>
+      <footer className="persist-note">
+        数据仅保存在本机浏览器（localStorage）：未提交的草稿、退回原因与流转记录关闭页面后仍会保留。
+      </footer>
     </main>
   );
 }
-
-export default App;
